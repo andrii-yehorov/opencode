@@ -27,7 +27,7 @@ $env:RUST_TARGET = $RustTarget
 $env:TAURI_ENV_TARGET_TRIPLE = $RustTarget
 
 $cargoBin = Join-Path $env:USERPROFILE ".cargo\bin"
-if (Test-Path $cargoBin -and -not $env:PATH.Contains($cargoBin)) {
+if ((Test-Path $cargoBin) -and (-not $env:PATH.Contains($cargoBin))) {
   $env:PATH = "$cargoBin;$env:PATH"
 }
 
