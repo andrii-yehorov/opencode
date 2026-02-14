@@ -7,6 +7,8 @@ type OpenDirectoryPickerOptions = { title?: string; multiple?: boolean }
 type OpenFilePickerOptions = { title?: string; multiple?: boolean }
 type SaveFilePickerOptions = { title?: string; defaultPath?: string }
 type UpdateInfo = { updateAvailable: boolean; version?: string }
+type AudioTranscriptionInput = { base64: string; mime: string; language?: string }
+type AudioTranscriptionResult = { text: string }
 
 export type Platform = {
   /** Platform discriminator */
@@ -86,6 +88,9 @@ export type Platform = {
 
   /** Read image from clipboard (desktop only) */
   readClipboardImage?(): Promise<File | null>
+
+  /** Transcribe audio using local desktop speech engine */
+  transcribeAudio?(input: AudioTranscriptionInput): Promise<AudioTranscriptionResult>
 }
 
 export type DisplayBackend = "auto" | "wayland"

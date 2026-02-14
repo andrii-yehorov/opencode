@@ -51,6 +51,8 @@ import { PromptImageAttachments } from "./prompt-input/image-attachments"
 import { PromptDragOverlay } from "./prompt-input/drag-overlay"
 import { promptPlaceholder } from "./prompt-input/placeholder"
 import { ImagePreview } from "@opencode-ai/ui/image-preview"
+import { showToast } from "@opencode-ai/ui/toast"
+import { startAudioCapture, type AudioCapture } from "@/utils/audio-capture"
 
 interface PromptInputProps {
   class?: string
@@ -87,6 +89,9 @@ const EXAMPLES = [
   "prompt.example.24",
   "prompt.example.25",
 ] as const
+
+const MAX_VOICE_MS = 90_000
+type VoiceState = "idle" | "recording" | "transcribing"
 
 export const PromptInput: Component<PromptInputProps> = (props) => {
   const sdk = useSDK()
@@ -214,6 +219,10 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
     draggingType: "image" | "@mention" | null
     mode: "normal" | "shell"
     applyingHistory: boolean
+    voice: VoiceState
+    voiceCapture: AudioCapture | null
+    voiceTimer: ReturnType<typeof setTimeout> | null
+    voiceCursor: number
   }>({
     popover: null,
     historyIndex: -1,
@@ -222,6 +231,10 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
     draggingType: null,
     mode: "normal",
     applyingHistory: false,
+    voice: "idle",
+    voiceCapture: null,
+    voiceTimer: null,
+    voiceCursor: 0,
   })
   const placeholder = createMemo(() =>
     promptPlaceholder({
@@ -316,11 +329,156 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
     return getCursorPosition(editorRef)
   }
 
+  const clearVoiceTimer = () => {
+    if (!store.voiceTimer) return
+    clearTimeout(store.voiceTimer)
+    setStore("voiceTimer", null)
+  }
+
+  const applyVoiceTranscript = (text: string, cursor: number) => {
+    const value = text.trim()
+    if (!value) return
+    const insert = `${value} `
+    const images = prompt.current().filter((part): part is ImageAttachmentPart => part.type === "image")
+    const parts = prompt.current().filter((part) => part.type !== "image")
+    const output: Exclude<ContentPart, ImageAttachmentPart>[] = []
+    let done = false
+
+    for (const part of parts) {
+      if (done) {
+        output.push(part)
+        continue
+      }
+
+      if (cursor < part.start || cursor > part.end) {
+        output.push(part)
+        continue
+      }
+
+      if (part.type === "text") {
+        const offset = Math.max(0, Math.min(cursor - part.start, part.content.length))
+        const left = part.content.slice(0, offset)
+        const right = part.content.slice(offset)
+        if (left) output.push({ ...part, content: left })
+        output.push({ type: "text", content: insert, start: 0, end: 0 })
+        if (right) output.push({ ...part, content: right })
+      } else {
+        if (cursor <= part.start) {
+          output.push({ type: "text", content: insert, start: 0, end: 0 })
+          output.push(part)
+        } else {
+          output.push(part)
+          output.push({ type: "text", content: insert, start: 0, end: 0 })
+        }
+      }
+
+      done = true
+    }
+
+    if (!done) {
+      output.push({ type: "text", content: insert, start: 0, end: 0 })
+    }
+
+    const next = output.map((part, index, list) => {
+      const start = list
+        .slice(0, index)
+        .reduce((sum, item) => sum + ("content" in item ? item.content.length : 0), 0)
+      const length = "content" in part ? part.content.length : 0
+      return {
+        ...part,
+        start,
+        end: start + length,
+      }
+    })
+
+    const nextCursor = cursor + insert.length
+    prompt.set([...next, ...images], nextCursor)
+    requestAnimationFrame(() => {
+      editorRef.focus()
+      setCursorPosition(editorRef, nextCursor)
+      queueScroll()
+    })
+  }
+
+  const stopVoiceCapture = async (source: "manual" | "timeout") => {
+    const capture = store.voiceCapture
+    if (!capture || store.voice !== "recording") return
+    clearVoiceTimer()
+    setStore("voice", "transcribing")
+    setStore("voiceCapture", null)
+    try {
+      const audio = await capture.stop()
+      if (!audio.base64) {
+        showToast({ title: language.t("prompt.voice.error.noSpeech") })
+        return
+      }
+      if (!platform.transcribeAudio) {
+        showToast({ title: language.t("prompt.voice.error.unavailable") })
+        return
+      }
+      const result = await platform.transcribeAudio({
+        base64: audio.base64,
+        mime: audio.mime,
+        language: "en",
+      })
+      const text = result.text.trim()
+      if (!text) {
+        showToast({ title: language.t("prompt.voice.error.noSpeech") })
+        return
+      }
+      applyVoiceTranscript(text, store.voiceCursor)
+      if (source === "timeout") {
+        showToast({ title: language.t("prompt.voice.timeout.title") })
+      }
+    } catch (error) {
+      showToast({
+        title: language.t("prompt.voice.error.failed"),
+        description: error instanceof Error ? error.message : undefined,
+      })
+    } finally {
+      setStore("voice", "idle")
+    }
+  }
+
+  const cancelVoiceCapture = async () => {
+    const capture = store.voiceCapture
+    clearVoiceTimer()
+    setStore("voiceCapture", null)
+    setStore("voice", "idle")
+    if (!capture) return
+    await capture.cancel().catch(() => undefined)
+  }
+
+  const startVoiceCapture = async () => {
+    if (store.voice !== "idle") return
+    if (!platform.transcribeAudio) {
+      showToast({ title: language.t("prompt.voice.error.unavailable") })
+      return
+    }
+    try {
+      const capture = await startAudioCapture()
+      const cursor = currentCursor() ?? prompt.cursor() ?? promptLength(prompt.current())
+      const timer = setTimeout(() => {
+        void stopVoiceCapture("timeout")
+      }, MAX_VOICE_MS)
+      setStore("voiceCapture", capture)
+      setStore("voiceCursor", cursor)
+      setStore("voiceTimer", timer)
+      setStore("voice", "recording")
+    } catch {
+      showToast({ title: language.t("prompt.voice.error.permission") })
+    }
+  }
+
   const renderEditorWithCursor = (parts: Prompt) => {
     const cursor = currentCursor()
     renderEditor(parts)
     if (cursor !== null) setCursorPosition(editorRef, cursor)
   }
+
+  onCleanup(() => {
+    void cancelVoiceCapture()
+  })
 
   createEffect(() => {
     params.id
@@ -1187,6 +1345,46 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
                     <Icon name="photo" class="size-4.5" />
                   </Button>
                 </Tooltip>
+                <Show when={platform.transcribeAudio}>
+                  <Tooltip
+                    placement="top"
+                    value={
+                      store.voice === "recording"
+                        ? language.t("prompt.voice.action.stop")
+                        : store.voice === "transcribing"
+                          ? language.t("prompt.voice.action.transcribing")
+                          : language.t("prompt.voice.action.start")
+                    }
+                  >
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      class="size-6 px-1"
+                      disabled={store.voice === "transcribing" || (store.voice === "idle" && working())}
+                      onClick={() => {
+                        if (store.voice === "recording") {
+                          void stopVoiceCapture("manual")
+                          return
+                        }
+                        void startVoiceCapture()
+                      }}
+                      aria-label={
+                        store.voice === "recording"
+                          ? language.t("prompt.voice.action.stop")
+                          : language.t("prompt.voice.action.start")
+                      }
+                    >
+                      <Icon
+                        name={store.voice === "recording" ? "stop" : "microphone"}
+                        classList={{
+                          "size-4.5": true,
+                          "text-icon-critical-base": store.voice === "recording",
+                          "animate-pulse": store.voice === "transcribing",
+                        }}
+                      />
+                    </Button>
+                  </Tooltip>
+                </Show>
               </Show>
             </div>
             <Tooltip
