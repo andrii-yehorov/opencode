@@ -421,6 +421,10 @@ const createPlatform = (password: Accessor<string | null>): Platform => {
         }, "image/png")
       })
     },
+
+    async transcribeAudio(input) {
+      return commands.transcribeAudioLocal(input)
+    },
   }
 }
 

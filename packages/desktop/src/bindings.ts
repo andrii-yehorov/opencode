@@ -18,6 +18,7 @@ export const commands = {
 	checkAppExists: (appName: string) => __TAURI_INVOKE<boolean>("check_app_exists", { appName }),
 	wslPath: (path: string, mode: "windows" | "linux" | null) => __TAURI_INVOKE<string>("wsl_path", { path, mode }),
 	resolveAppPath: (appName: string) => __TAURI_INVOKE<string | null>("resolve_app_path", { appName }),
+	transcribeAudioLocal: (input: AudioTranscriptionInput) => __TAURI_INVOKE<AudioTranscriptionResult>("transcribe_audio_local", { input }),
 };
 
 /** Events */
@@ -27,6 +28,16 @@ export const events = {
 };
 
 /* Types */
+export type AudioTranscriptionInput = {
+		base64: string,
+		mime: string,
+		language: string | null,
+	};
+
+export type AudioTranscriptionResult = {
+		text: string,
+	};
+
 export type InitStep = { phase: "server_waiting" } | { phase: "sqlite_waiting" } | { phase: "done" };
 
 export type LinuxDisplayBackend = "wayland" | "auto";

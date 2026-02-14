@@ -7,6 +7,7 @@ pub mod linux_display;
 mod logging;
 mod markdown;
 mod server;
+mod transcription;
 mod window_customizer;
 mod windows;
 
@@ -516,7 +517,8 @@ fn make_specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             markdown::parse_markdown_command,
             check_app_exists,
             wsl_path,
-            resolve_app_path
+            resolve_app_path,
+            transcription::transcribe_audio_local
         ])
         .events(tauri_specta::collect_events![
             LoadingWindowComplete,
