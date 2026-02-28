@@ -19,6 +19,7 @@ export const commands = {
 	wslPath: (path: string, mode: "windows" | "linux" | null) => __TAURI_INVOKE<string>("wsl_path", { path, mode }),
 	resolveAppPath: (appName: string) => __TAURI_INVOKE<string | null>("resolve_app_path", { appName }),
 	openPath: (path: string, appName: string | null) => __TAURI_INVOKE<null>("open_path", { path, appName }),
+	transcribeAudioLocal: (base64: string, mime: string, language: string | null) => __TAURI_INVOKE<TranscriptionResult>("transcribe_audio_local", { base64, mime, language }),
 };
 
 /** Events */
@@ -42,6 +43,10 @@ export type ServerReadyData = {
 	};
 
 export type SqliteMigrationProgress = { type: "InProgress"; value: number } | { type: "Done" };
+
+export type TranscriptionResult = {
+		text: string,
+	};
 
 export type WslConfig = {
 		enabled: boolean,

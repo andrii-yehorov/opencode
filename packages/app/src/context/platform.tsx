@@ -86,6 +86,9 @@ export type Platform = {
 
   /** Read image from clipboard (desktop only) */
   readClipboardImage?(): Promise<File | null>
+
+  /** Transcribe captured audio locally (desktop only) */
+  transcribeAudio?(input: { base64: string; mime: string; language?: string }): Promise<{ text: string }>
 }
 
 export type DisplayBackend = "auto" | "wayland"

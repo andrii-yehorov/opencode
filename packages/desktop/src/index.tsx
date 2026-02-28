@@ -400,6 +400,10 @@ const createPlatform = (): Platform => {
         }, "image/png")
       })
     },
+
+    async transcribeAudio(input) {
+      return commands.transcribeAudioLocal(input.base64, input.mime, input.language ?? null)
+    },
   }
 }
 

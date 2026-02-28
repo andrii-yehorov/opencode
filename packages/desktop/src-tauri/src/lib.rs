@@ -8,6 +8,7 @@ mod logging;
 mod markdown;
 mod os;
 mod server;
+mod transcribe;
 mod window_customizer;
 mod windows;
 
@@ -403,7 +404,8 @@ fn make_specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             check_app_exists,
             wsl_path,
             resolve_app_path,
-            open_path
+            open_path,
+            transcribe::transcribe_audio_local
         ])
         .events(tauri_specta::collect_events![
             LoadingWindowComplete,
@@ -561,12 +563,17 @@ async fn initialize(app: AppHandle) {
     .map_err(|_| ())
     .shared();
 
-    let loading_window = if needs_sqlite_migration
-        && timeout(Duration::from_secs(1), loading_task.clone())
-            .await
-            .is_err()
-    {
-        tracing::debug!("Loading task timed out, showing loading window");
+    let show_loading_window = if cfg!(debug_assertions) {
+        true
+    } else {
+        needs_sqlite_migration
+            && timeout(Duration::from_secs(1), loading_task.clone())
+                .await
+                .is_err()
+    };
+
+    let loading_window = if show_loading_window {
+        tracing::debug!("Showing loading window");
         let loading_window = LoadingWindow::create(&app).expect("Failed to create loading window");
         sleep(Duration::from_secs(1)).await;
         Some(loading_window)

@@ -28,6 +28,7 @@ import { Tooltip, TooltipKeybind } from "@opencode-ai/ui/tooltip"
 import { IconButton } from "@opencode-ai/ui/icon-button"
 import { Select } from "@opencode-ai/ui/select"
 import { RadioGroup } from "@opencode-ai/ui/radio-group"
+import { showToast } from "@opencode-ai/ui/toast"
 import { useDialog } from "@opencode-ai/ui/context/dialog"
 import { ModelSelectorPopover } from "@/components/dialog-select-model"
 import { DialogSelectModelUnpaid } from "@/components/dialog-select-model-unpaid"
@@ -37,6 +38,9 @@ import { Persist, persisted } from "@/utils/persist"
 import { usePermission } from "@/context/permission"
 import { useLanguage } from "@/context/language"
 import { usePlatform } from "@/context/platform"
+import { createAudioCapture } from "@/utils/audio-capture"
+import { blobToBase64, MAX_AUDIO_BYTES, whisperAudio } from "@/utils/audio-encoding"
+import { voiceErrorKey } from "@/utils/voice-errors"
 import { createTextFragment, getCursorPosition, setCursorPosition, setRangeEdge } from "./prompt-input/editor-dom"
 import { createPromptAttachments, ACCEPTED_FILE_TYPES } from "./prompt-input/attachments"
 import {
@@ -93,6 +97,14 @@ const EXAMPLES = [
 ] as const
 
 const NON_EMPTY_TEXT = /[^\s\u200B]/
+const MAX_RECORDING_MS = 120_000
+
+const formatVoiceTime = (elapsed: number) => {
+  const value = Math.max(0, Math.floor(elapsed / 1000))
+  const minutes = Math.floor(value / 60)
+  const seconds = value % 60
+  return `${minutes}:${seconds.toString().padStart(2, "0")}`
+}
 
 export const PromptInput: Component<PromptInputProps> = (props) => {
   const sdk = useSDK()
@@ -244,6 +256,10 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
     draggingType: "image" | "@mention" | null
     mode: "normal" | "shell"
     applyingHistory: boolean
+    voiceState: "idle" | "recording" | "stopping" | "transcribing"
+    voiceStartedAt: number | null
+    voiceElapsed: number
+    voiceSession: number
   }>({
     popover: null,
     historyIndex: -1,
@@ -252,6 +268,10 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
     draggingType: null,
     mode: "normal",
     applyingHistory: false,
+    voiceState: "idle",
+    voiceStartedAt: null,
+    voiceElapsed: 0,
+    voiceSession: 0,
   })
 
   const commentCount = createMemo(() => {
@@ -399,6 +419,22 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
     requestAnimationFrame(() => editorRef?.focus())
   }
 
+  const capture = createAudioCapture({ maxDurationMs: MAX_RECORDING_MS })
+  let activeRecording: Awaited<ReturnType<typeof capture.start>> | undefined
+
+  const voiceEnabled = createMemo(
+    () => store.mode === "normal" && platform.platform === "desktop" && !!platform.transcribeAudio,
+  )
+  const voiceRecording = createMemo(() => store.voiceState === "recording")
+  const voiceBusy = createMemo(() => store.voiceState !== "idle")
+  const voiceElapsed = createMemo(() => formatVoiceTime(store.voiceElapsed))
+  const voiceTooltip = createMemo(() => {
+    if (store.voiceState === "recording") return `${language.t("prompt.action.stopRecording")} (${voiceElapsed()})`
+    if (store.voiceState === "transcribing") return language.t("prompt.action.transcribing")
+    if (store.voiceState === "stopping") return language.t("prompt.action.stopRecording")
+    return language.t("prompt.action.startRecording")
+  })
+
   const shellModeKey = "mod+shift+x"
   const normalModeKey = "mod+shift+e"
 
@@ -426,6 +462,17 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
       keybind: normalModeKey,
       disabled: store.mode === "normal",
       onSelect: () => setMode("normal"),
+    },
+    {
+      id: "voice.toggleRecording",
+      title: language.t("command.voice.toggleRecording"),
+      description: language.t("command.voice.toggleRecording.description"),
+      category: language.t("command.category.session"),
+      keybind: platform.os === "windows" ? "mod+shift+m" : "alt+shift+m",
+      disabled: !voiceEnabled() || store.voiceState === "stopping" || store.voiceState === "transcribing",
+      onSelect: () => {
+        void toggleVoiceRecording()
+      },
     },
   ])
 
@@ -478,6 +525,19 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
       setStore("placeholder", (prev) => (prev + 1) % EXAMPLES.length)
     }, 6500)
     onCleanup(() => clearInterval(interval))
+  })
+
+  createEffect(() => {
+    if (!voiceRecording()) return
+    if (!store.voiceStartedAt) return
+    const timer = setInterval(() => {
+      setStore("voiceElapsed", Date.now() - (store.voiceStartedAt ?? Date.now()))
+    }, 250)
+    onCleanup(() => clearInterval(timer))
+  })
+
+  onCleanup(() => {
+    capture.cancel()
   })
 
   const [composing, setComposing] = createSignal(false)
@@ -920,6 +980,113 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
     return true
   }
 
+  const appendTranscript = (value: string) => {
+    const text = value.trim()
+    if (!text) return false
+    const current = prompt
+      .current()
+      .filter((part) => part.type !== "image")
+      .map((part) => ("content" in part ? part.content : ""))
+      .join("")
+    const next = current && !/[\s\n]$/.test(current) ? ` ${text}` : text
+    focusEditorEnd()
+    addPart({ type: "text", content: next, start: 0, end: 0 })
+    return true
+  }
+
+  async function startVoiceRecording() {
+    if (!voiceEnabled()) throw new Error("VOICE_UNSUPPORTED")
+    if (voiceBusy()) return
+
+    const session = store.voiceSession + 1
+    setStore("voiceSession", session)
+
+    const recording = await capture.start()
+    if (session !== store.voiceSession) {
+      recording.stop()
+      return
+    }
+
+    activeRecording = recording
+    setStore("voiceState", "recording")
+    setStore("voiceStartedAt", Date.now())
+    setStore("voiceElapsed", 0)
+
+    void recording.done.then(() => {
+      if (session !== store.voiceSession) return
+      if (store.voiceState !== "recording") return
+      void stopVoiceRecording().catch((err) => {
+        showToast({ title: language.t(voiceErrorKey(err) as Parameters<typeof language.t>[0]) })
+        activeRecording = undefined
+        setStore("voiceState", "idle")
+        setStore("voiceStartedAt", null)
+        setStore("voiceElapsed", 0)
+      })
+    })
+  }
+
+  async function stopVoiceRecording() {
+    if (!activeRecording || store.voiceState !== "recording") return
+
+    const session = store.voiceSession
+    const recording = activeRecording
+    setStore("voiceState", "stopping")
+    recording.stop()
+
+    const captured = await recording.done
+    if (session !== store.voiceSession) {
+      activeRecording = undefined
+      return
+    }
+
+    setStore("voiceState", "transcribing")
+    const audio = await whisperAudio(captured.blob, captured.mime)
+    const base64 = await blobToBase64(audio.blob)
+    if (audio.blob.size > MAX_AUDIO_BYTES) throw new Error("Audio too large")
+    if (!platform.transcribeAudio) throw new Error("Local transcription unavailable")
+
+    const result = await platform.transcribeAudio({
+      base64,
+      mime: audio.mime,
+      language: typeof navigator === "object" ? navigator.language : undefined,
+    })
+
+    if (session !== store.voiceSession) {
+      activeRecording = undefined
+      return
+    }
+
+    if (!appendTranscript(result.text)) {
+      showToast({
+        title: language.t("prompt.voice.error.noAudioCaptured"),
+      })
+    }
+
+    activeRecording = undefined
+    setStore("voiceState", "idle")
+    setStore("voiceStartedAt", null)
+    setStore("voiceElapsed", 0)
+  }
+
+  async function toggleVoiceRecording() {
+    if (store.voiceState === "recording") {
+      await stopVoiceRecording().catch((err) => {
+        showToast({ title: language.t(voiceErrorKey(err) as Parameters<typeof language.t>[0]) })
+        activeRecording = undefined
+        setStore("voiceState", "idle")
+        setStore("voiceStartedAt", null)
+        setStore("voiceElapsed", 0)
+      })
+      return
+    }
+
+    if (store.voiceState !== "idle") return
+
+    await startVoiceRecording().catch((err) => {
+      showToast({ title: language.t(voiceErrorKey(err) as Parameters<typeof language.t>[0]) })
+    })
+  }
+
   const addToHistory = (prompt: Prompt, mode: "normal" | "shell") => {
     const currentHistory = mode === "shell" ? shellHistory : history
     const setCurrentHistory = mode === "shell" ? setShellHistory : setHistory
@@ -1190,7 +1357,7 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
             if (!(target instanceof HTMLElement)) return
             if (
               target.closest(
-                '[data-action="prompt-attach"], [data-action="prompt-submit"], [data-action="prompt-permissions"]',
+                '[data-action="prompt-attach"], [data-action="prompt-voice"], [data-action="prompt-submit"], [data-action="prompt-permissions"]',
               )
             ) {
               return
@@ -1273,6 +1440,28 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
                   aria-label={language.t("prompt.action.attachFile")}
                 >
                   <Icon name="plus" class="size-4.5" />
+                </Button>
+              </TooltipKeybind>
+
+              <TooltipKeybind
+                placement="top"
+                title={voiceTooltip()}
+                keybind={command.keybind("voice.toggleRecording")}
+              >
+                <Button
+                  data-action="prompt-voice"
+                  type="button"
+                  variant={voiceRecording() ? "primary" : "ghost"}
+                  class="size-8 p-0 relative"
+                  onClick={() => {
+                    void toggleVoiceRecording()
+                  }}
+                  disabled={!voiceEnabled() || store.voiceState === "stopping" || store.voiceState === "transcribing"}
+                  tabIndex={store.mode === "normal" ? undefined : -1}
+                  aria-label={voiceTooltip()}
+                  aria-pressed={voiceRecording()}
+                >
+                  <Icon name="microphone" class="size-4.5" classList={{ "animate-pulse": voiceRecording() }} />
                 </Button>
               </TooltipKeybind>
 

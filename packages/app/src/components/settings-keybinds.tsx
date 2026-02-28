@@ -24,6 +24,18 @@ type KeybindMeta = {
 type KeybindMap = Record<string, string | undefined>
 type CommandContext = ReturnType<typeof useCommand>
 
+const ACTIVE_VOICE_KEYBINDS = new Set(["voice.toggleRecording"])
+
+function includeCommand(id: string, title?: string) {
+  const lower = (title ?? "").trim().toLowerCase()
+  if (lower === "toggle voice input") return false
+
+  const voiceScoped = /(^|\.)voice\./.test(id)
+  if (voiceScoped && !ACTIVE_VOICE_KEYBINDS.has(id)) return false
+
+  return true
+}
+
 const GROUPS: KeybindGroup[] = ["General", "Session", "Navigation", "Model and agent", "Terminal", "Prompt"]
 
 type GroupKey =
@@ -48,7 +60,7 @@ function groupFor(id: string): KeybindGroup {
   if (id.startsWith("terminal.")) return "Terminal"
   if (id.startsWith("model.") || id.startsWith("agent.") || id.startsWith("mcp.")) return "Model and agent"
   if (id.startsWith("file.") || id.startsWith("fileTree.")) return "Navigation"
-  if (id.startsWith("prompt.")) return "Prompt"
+  if (id.startsWith("prompt.") || id.startsWith("voice.")) return "Prompt"
   if (
     id.startsWith("session.") ||
     id.startsWith("message.") ||
@@ -121,17 +133,20 @@ function listFor(command: CommandContext, map: KeybindMap, palette: string) {
 
   for (const opt of command.catalog) {
     if (opt.id.startsWith("suggested.")) continue
+    if (!includeCommand(opt.id, opt.title)) continue
     out.set(opt.id, { title: opt.title, group: groupFor(opt.id) })
   }
 
   for (const opt of command.options) {
     if (opt.id.startsWith("suggested.")) continue
+    if (!includeCommand(opt.id, opt.title)) continue
     out.set(opt.id, { title: opt.title, group: groupFor(opt.id) })
   }
 
   for (const [id, value] of Object.entries(map)) {
     if (typeof value !== "string") continue
     if (out.has(id)) continue
+    if (!includeCommand(id)) continue
     out.set(id, { title: id, group: groupFor(id) })
   }
 
